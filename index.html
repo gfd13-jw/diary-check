@@ -22,7 +22,7 @@
 </head>
 <body class="bg-slate-100 text-slate-800 font-sans pb-28">
 
-  <!-- 헤더 -->
+  <!-- 상단 헤더 -->
   <header class="sticky top-0 z-40 bg-white/95 backdrop-blur shadow-sm border-b border-slate-200 px-4 py-3">
     <div class="max-w-2xl mx-auto flex items-center justify-between">
       <div class="flex items-center gap-2">
@@ -33,7 +33,7 @@
           <h1 class="font-bold text-base text-slate-800 leading-tight">현장 실시간 사진 일지</h1>
           <div class="flex items-center gap-1.5 mt-0.5">
             <span class="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-            <span class="text-[11px] text-slate-500 font-medium">실시간 동기화 중</span>
+            <span class="text-[11px] text-slate-500 font-medium">실시간 동기화 중 (다중 사진 지원)</span>
           </div>
         </div>
       </div>
@@ -84,24 +84,24 @@
       <div id="preview-strip" class="hidden flex items-center gap-2 overflow-x-auto pb-2 mb-2 custom-scrollbar"></div>
 
       <div class="flex items-center gap-2">
-        <!-- 1. 카메라 촬영 -->
+        <!-- 카메라 촬영 -->
         <label class="flex-shrink-0 cursor-pointer w-11 h-11 rounded-xl bg-slate-100 hover:bg-blue-50 hover:text-blue-600 text-slate-600 flex items-center justify-center border border-slate-200 transition active:scale-95" title="카메라 촬영">
           <i class="ph-bold ph-camera text-xl"></i>
           <input type="file" id="camera-input" accept="image/*" capture="environment" multiple class="hidden" onchange="handleFileSelect(event)">
         </label>
 
-        <!-- 2. 갤러리 다중 선택 -->
+        <!-- 갤러리 다중 선택 -->
         <label class="flex-shrink-0 cursor-pointer w-11 h-11 rounded-xl bg-slate-100 hover:bg-blue-50 hover:text-blue-600 text-slate-600 flex items-center justify-center border border-slate-200 transition active:scale-95" title="앨범 사진 선택">
           <i class="ph-bold ph-images text-xl"></i>
           <input type="file" id="gallery-input" accept="image/*" multiple class="hidden" onchange="handleFileSelect(event)">
         </label>
 
-        <!-- 3. 코멘트 입력창 -->
+        <!-- 코멘트 입력창 -->
         <div class="flex-grow relative">
           <input type="text" id="comment-input" placeholder="사진 코멘트를 입력하세요..." class="w-full bg-slate-100 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white border border-transparent transition" onkeypress="if(event.key==='Enter') submitPost()">
         </div>
 
-        <!-- 4. 등록 버튼 -->
+        <!-- 등록 버튼 -->
         <button id="submit-btn" onclick="submitPost()" class="flex-shrink-0 bg-blue-600 hover:bg-blue-700 active:scale-95 text-white font-bold px-4 py-2.5 rounded-xl text-sm flex items-center gap-1 shadow-sm transition">
           <span id="submit-btn-text">등록</span>
           <i class="ph-bold ph-paper-plane-tilt"></i>
@@ -110,7 +110,7 @@
     </div>
   </div>
 
-  <!-- 이미지 확대 모달 -->
+  <!-- 이미지 확대 모달 (라이트박스) -->
   <div id="image-modal" class="hidden fixed inset-0 z-50 bg-black/95 backdrop-blur-md flex flex-col justify-between select-none">
     <div class="flex items-center justify-between text-white p-3 z-20 bg-black/50">
       <div class="flex items-center gap-2">
@@ -141,7 +141,7 @@
     </div>
   </div>
 
-  <!-- 백업 모달 -->
+  <!-- 기간별 백업 모달 -->
   <div id="backup-modal" class="hidden fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
     <div class="bg-white w-full max-w-sm rounded-2xl p-5 shadow-2xl border border-slate-100">
       <div class="flex items-center justify-between pb-3 border-b border-slate-100">
@@ -222,6 +222,7 @@
       bindFirestoreRealtime(currentDate);
     });
 
+    // 실시간 감시: 메인 포스트와 하위 사진 문서를 함께 로드
     function bindFirestoreRealtime(dateStr) {
       if (unsubscribeSnapshot) unsubscribeSnapshot();
 
@@ -236,14 +237,24 @@
 
       const postsRef = db.collection('photo_diaries').doc(dateStr).collection('posts').orderBy('timestamp', 'desc');
 
-      unsubscribeSnapshot = postsRef.onSnapshot((snapshot) => {
-        currentPosts = [];
-        snapshot.forEach(doc => {
-          currentPosts.push({ id: doc.id, ...doc.data() });
-        });
+      unsubscribeSnapshot = postsRef.onSnapshot(async (snapshot) => {
+        const postsTemp = [];
+        for (const doc of snapshot.docs) {
+          const postData = { id: doc.id, ...doc.data() };
+          
+          // 하위 컬렉션(images)에 개별 저장된 사진들을 순서대로 불러옴 (1MB 한도 무력화)
+          const imgSnap = await doc.ref.collection('images').orderBy('order', 'asc').get();
+          if (!imgSnap.empty) {
+            postData.images = imgSnap.docs.map(iDoc => iDoc.data().dataUrl);
+          } else if (!postData.images) {
+            postData.images = [];
+          }
+          postsTemp.push(postData);
+        }
+        currentPosts = postsTemp;
         renderFeed(currentPosts);
       }, (error) => {
-        console.error("Firestore 실시간 오류:", error);
+        console.error("Firestore 오류:", error);
       });
     }
 
@@ -266,8 +277,8 @@
       bindFirestoreRealtime(currentDate);
     }
 
-    // 1MB 한도 안전 규격: 1200px & 품질 0.72 (장당 약 150KB 내외로 압축)
-    function compressImage(file, maxDimension = 1200, quality = 0.72) {
+    // 선명도와 가벼운 용량을 동시에 잡은 최적 압축 엔진 (1000px, 0.70)
+    function compressImage(file, maxDimension = 1000, quality = 0.70) {
       return new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = (e) => {
@@ -322,7 +333,7 @@
         }
         renderPreviewStrip();
       } catch (err) {
-        alert("이미지 처리 중 오류: " + err.message);
+        alert("이미지 처리 오류: " + err.message);
       } finally {
         submitBtn.disabled = false;
         document.getElementById('submit-btn-text').innerText = "등록";
@@ -354,7 +365,7 @@
       renderPreviewStrip();
     }
 
-    // 업로드 등록
+    // ★★★ 핵심 수정: 사진들을 개별 문서로 분할 저장 (1MB 초과 완전 차단) ★★★
     async function submitPost() {
       const commentInput = document.getElementById('comment-input');
       const comment = commentInput.value.trim();
@@ -366,26 +377,33 @@
 
       const submitBtn = document.getElementById('submit-btn');
       submitBtn.disabled = true;
-      document.getElementById('submit-btn-text').innerText = "등록 중...";
+      document.getElementById('submit-btn-text').innerText = "업로드 중...";
 
       const now = new Date();
       const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
 
-      const postData = {
-        time: timeStr,
-        comment: comment,
-        images: [...selectedImagesBase64],
-        timestamp: firebase.firestore.FieldValue.serverTimestamp()
-      };
-
       try {
-        await db.collection('photo_diaries').doc(currentDate).collection('posts').add(postData);
+        // 1. 메인 포스트 생성 (시간, 댓글만 가볍게 저장)
+        const postDocRef = await db.collection('photo_diaries').doc(currentDate).collection('posts').add({
+          time: timeStr,
+          comment: comment,
+          timestamp: firebase.firestore.FieldValue.serverTimestamp()
+        });
+
+        // 2. 사진 각각을 하위 컬렉션(images)에 1장씩 분할 저장 (아무리 여러 장 올려도 1MB 한도 미초과)
+        for (let i = 0; i < selectedImagesBase64.length; i++) {
+          await postDocRef.collection('images').add({
+            order: i,
+            dataUrl: selectedImagesBase64[i]
+          });
+        }
+
         commentInput.value = "";
         selectedImagesBase64 = [];
         renderPreviewStrip();
       } catch (err) {
         console.error("Firestore Error:", err);
-        alert("업로드 실패 원인: " + (err.message || err.code || "알 수 없는 오류"));
+        alert("업로드 실패: " + (err.message || err.code));
       } finally {
         submitBtn.disabled = false;
         document.getElementById('submit-btn-text').innerText = "등록";
@@ -516,7 +534,6 @@
       updateModalImage();
     }
 
-    // 백업 다운로드
     function openBackupModal() {
       document.getElementById('backup-modal').classList.remove('hidden');
     }
@@ -555,7 +572,7 @@
       const zip = new JSZip();
       let totalFoundPosts = 0;
 
-      pText.innerText = "일지 데이터 압축 준비 중...";
+      pText.innerText = "일지 데이터 수집 중...";
 
       for (const dStr of dateList) {
         const snap = await db.collection('photo_diaries').doc(dStr).collection('posts').orderBy('timestamp', 'asc').get();
@@ -563,19 +580,24 @@
           const folder = zip.folder(dStr);
           let logText = `=== [${dStr} 현장 사진 일지 백업] ===\n\n`;
 
-          snap.forEach((doc, docIdx) => {
+          for (let docIdx = 0; docIdx < snap.docs.length; docIdx++) {
+            const doc = snap.docs[docIdx];
             const data = doc.data();
             totalFoundPosts++;
+
+            const imgSnap = await doc.ref.collection('images').orderBy('order', 'asc').get();
+            const imgs = imgSnap.docs.map(iDoc => iDoc.data().dataUrl);
+
             logText += `[${docIdx + 1}] 시간: ${data.time || '기록 없음'}\n`;
             logText += `메모/코멘트: ${data.comment || '(없음)'}\n`;
-            logText += `사진 수량: ${(data.images || []).length}장\n`;
+            logText += `사진 수량: ${imgs.length}장\n`;
             logText += `----------------------------------------\n\n`;
 
-            (data.images || []).forEach((b64Url, imgIdx) => {
+            imgs.forEach((b64Url, imgIdx) => {
               const base64Data = b64Url.split(',')[1];
               folder.file(`시간_${(data.time || '000000').replace(/:/g, '')}_사진${imgIdx + 1}.jpg`, base64Data, { base64: true });
             });
-          });
+          }
 
           folder.file("일지_내역.txt", logText);
         }
