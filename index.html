@@ -1,0 +1,625 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>현장 실시간 사진 일지</title>
+  
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/@phosphor-icons/web"></script>
+  
+  <!-- Firestore SDK만 사용 (Storage 불필요) -->
+  <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-firestore-compat.js"></script>
+  <!-- JSZip 백업 다운로드 엔진 -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+
+  <style>
+    * { -webkit-tap-highlight-color: transparent; }
+    .custom-scrollbar::-webkit-scrollbar { height: 4px; }
+    .custom-scrollbar::-webkit-scrollbar-track { background: #f1f5f9; }
+    .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+  </style>
+</head>
+<body class="bg-slate-100 text-slate-800 font-sans pb-28">
+
+  <!-- 헤더 -->
+  <header class="sticky top-0 z-40 bg-white/95 backdrop-blur shadow-sm border-b border-slate-200 px-4 py-3">
+    <div class="max-w-2xl mx-auto flex items-center justify-between">
+      <div class="flex items-center gap-2">
+        <div class="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center text-white shadow-sm">
+          <i class="ph-bold ph-camera text-lg"></i>
+        </div>
+        <div>
+          <h1 class="font-bold text-base text-slate-800 leading-tight">현장 실시간 사진 일지</h1>
+          <div class="flex items-center gap-1.5 mt-0.5">
+            <span class="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+            <span class="text-[11px] text-slate-500 font-medium">실시간 동기화 중 (무료 플랜)</span>
+          </div>
+        </div>
+      </div>
+      
+      <div class="flex items-center gap-2">
+        <button onclick="openBackupModal()" class="text-xs bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-200 px-3 py-1.5 rounded-full font-bold flex items-center gap-1 transition shadow-sm active:scale-95">
+          <i class="ph-bold ph-download-simple"></i>백업
+        </button>
+        <button onclick="scrollToTop()" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-600 px-2.5 py-1.5 rounded-full font-medium transition">
+          <i class="ph-bold ph-arrow-up"></i>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- 날짜 탐색 바 -->
+  <section class="max-w-2xl mx-auto px-4 mt-3">
+    <div class="bg-white rounded-2xl p-3 shadow-sm border border-slate-200 flex items-center justify-between gap-2">
+      <button onclick="changeDate(-1)" class="p-2 hover:bg-slate-100 rounded-xl text-slate-600 active:scale-95 transition">
+        <i class="ph-bold ph-caret-left text-lg"></i>
+      </button>
+
+      <div class="flex items-center gap-2">
+        <i class="ph-bold ph-calendar text-blue-600 text-lg"></i>
+        <input type="date" id="selected-date" onchange="onDateChange()" class="font-bold text-slate-800 text-sm sm:text-base border-none focus:outline-none bg-transparent cursor-pointer">
+        <button onclick="setToday()" id="today-btn" class="hidden text-xs bg-blue-50 text-blue-600 font-bold px-2.5 py-1 rounded-full border border-blue-200">
+          오늘
+        </button>
+      </div>
+
+      <button onclick="changeDate(1)" class="p-2 hover:bg-slate-100 rounded-xl text-slate-600 active:scale-95 transition">
+        <i class="ph-bold ph-caret-right text-lg"></i>
+      </button>
+    </div>
+  </section>
+
+  <!-- 메인 피드 컨테이너 -->
+  <main class="max-w-2xl mx-auto px-4 mt-4 space-y-4" id="feed-container">
+    <div class="bg-white rounded-2xl p-6 text-center shadow-sm border border-slate-200 text-slate-400">
+      <i class="ph-bold ph-spinner animate-spin text-2xl text-blue-600 mb-2"></i>
+      <p class="text-sm">클라우드 일지를 불러오는 중...</p>
+    </div>
+  </main>
+
+  <!-- 하단 플로팅 업로드 바 -->
+  <div class="fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur border-t border-slate-200 p-3 shadow-lg">
+    <div class="max-w-2xl mx-auto">
+      <div id="preview-strip" class="hidden flex items-center gap-2 overflow-x-auto pb-2 mb-2 custom-scrollbar"></div>
+
+      <div class="flex items-center gap-2">
+        <!-- 1. 카메라 촬영 -->
+        <label class="flex-shrink-0 cursor-pointer w-11 h-11 rounded-xl bg-slate-100 hover:bg-blue-50 hover:text-blue-600 text-slate-600 flex items-center justify-center border border-slate-200 transition active:scale-95" title="카메라 촬영">
+          <i class="ph-bold ph-camera text-xl"></i>
+          <input type="file" id="camera-input" accept="image/*" capture="environment" multiple class="hidden" onchange="handleFileSelect(event)">
+        </label>
+
+        <!-- 2. 갤러리 다중 선택 -->
+        <label class="flex-shrink-0 cursor-pointer w-11 h-11 rounded-xl bg-slate-100 hover:bg-blue-50 hover:text-blue-600 text-slate-600 flex items-center justify-center border border-slate-200 transition active:scale-95" title="앨범 사진 선택">
+          <i class="ph-bold ph-images text-xl"></i>
+          <input type="file" id="gallery-input" accept="image/*" multiple class="hidden" onchange="handleFileSelect(event)">
+        </label>
+
+        <!-- 3. 코멘트 입력창 -->
+        <div class="flex-grow relative">
+          <input type="text" id="comment-input" placeholder="사진 코멘트를 입력하세요..." class="w-full bg-slate-100 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white border border-transparent transition" onkeypress="if(event.key==='Enter') submitPost()">
+        </div>
+
+        <!-- 4. 등록 버튼 -->
+        <button id="submit-btn" onclick="submitPost()" class="flex-shrink-0 bg-blue-600 hover:bg-blue-700 active:scale-95 text-white font-bold px-4 py-2.5 rounded-xl text-sm flex items-center gap-1 shadow-sm transition">
+          <span id="submit-btn-text">등록</span>
+          <i class="ph-bold ph-paper-plane-tilt"></i>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 이미지 확대 모달 (라이트박스 & 더블탭/버튼 확대) -->
+  <div id="image-modal" class="hidden fixed inset-0 z-50 bg-black/95 backdrop-blur-md flex flex-col justify-between select-none">
+    <div class="flex items-center justify-between text-white p-3 z-20 bg-black/50">
+      <div class="flex items-center gap-2">
+        <span id="modal-counter" class="text-xs font-semibold bg-white/20 px-3 py-1 rounded-full">1 / 1</span>
+        <button onclick="toggleModalZoom()" id="zoom-toggle-btn" class="text-xs bg-white/20 hover:bg-white/30 text-white px-3 py-1 rounded-full">
+          2배 확대
+        </button>
+      </div>
+      <button onclick="closeModal()" class="w-9 h-9 rounded-full bg-white/20 hover:bg-white/30 flex items-center justify-center text-white text-lg active:scale-90 transition">
+        <i class="ph-bold ph-x"></i>
+      </button>
+    </div>
+
+    <div class="relative flex-grow w-full h-full flex items-center justify-center overflow-auto p-2" onclick="onModalBgClick(event)">
+      <button onclick="prevModalImage(); event.stopPropagation();" class="absolute left-2 z-10 w-11 h-11 rounded-full bg-black/50 hover:bg-black/70 text-white flex items-center justify-center text-xl transition active:scale-90">
+        <i class="ph-bold ph-caret-left"></i>
+      </button>
+      
+      <img id="modal-image" src="" class="max-h-[82vh] max-w-[96vw] object-contain transition-transform duration-200 cursor-zoom-in" ondblclick="toggleModalZoom()">
+
+      <button onclick="nextModalImage(); event.stopPropagation();" class="absolute right-2 z-10 w-11 h-11 rounded-full bg-black/50 hover:bg-black/70 text-white flex items-center justify-center text-xl transition active:scale-90">
+        <i class="ph-bold ph-caret-right"></i>
+      </button>
+    </div>
+
+    <div class="z-20 text-center px-4 py-3 bg-black/70 text-white text-xs sm:text-sm">
+      <p id="modal-caption" class="line-clamp-2 text-slate-200 font-medium"></p>
+    </div>
+  </div>
+
+  <!-- 백업 모달 -->
+  <div id="backup-modal" class="hidden fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="bg-white w-full max-w-sm rounded-2xl p-5 shadow-2xl border border-slate-100">
+      <div class="flex items-center justify-between pb-3 border-b border-slate-100">
+        <div class="flex items-center gap-2">
+          <i class="ph-bold ph-archive text-amber-600 text-xl"></i>
+          <h3 class="font-bold text-slate-800 text-base">기간별 사진 일지 백업</h3>
+        </div>
+        <button onclick="closeBackupModal()" class="text-slate-400 hover:text-slate-600 p-1">
+          <i class="ph-bold ph-x text-lg"></i>
+        </button>
+      </div>
+
+      <p class="text-xs text-slate-500 mt-3 leading-relaxed">
+        사진 파일과 코멘트를 <b>ZIP 압축 파일</b>로 저장합니다.<br>
+        <span class="text-emerald-600 font-medium">※ 백업 후에도 클라우드 원본은 안전하게 보존됩니다.</span>
+      </p>
+
+      <div class="mt-4 space-y-2">
+        <button onclick="downloadBackup('week')" class="w-full bg-slate-50 hover:bg-blue-50 border border-slate-200 text-slate-700 font-bold p-3 rounded-xl flex items-center justify-between text-sm transition">
+          <div class="flex items-center gap-2">
+            <i class="ph-bold ph-calendar-check text-blue-600 text-lg"></i>
+            <span>최근 7일간 백업 (1주일)</span>
+          </div>
+          <i class="ph-bold ph-download-simple"></i>
+        </button>
+
+        <button onclick="downloadBackup('month')" class="w-full bg-slate-50 hover:bg-blue-50 border border-slate-200 text-slate-700 font-bold p-3 rounded-xl flex items-center justify-between text-sm transition">
+          <div class="flex items-center gap-2">
+            <i class="ph-bold ph-calendar-blank text-indigo-600 text-lg"></i>
+            <span>선택 월 전체 백업 (당월)</span>
+          </div>
+          <i class="ph-bold ph-download-simple"></i>
+        </button>
+      </div>
+
+      <div id="backup-progress-container" class="hidden mt-4 pt-3 border-t border-slate-100">
+        <div class="flex justify-between text-xs text-slate-500 mb-1">
+          <span id="backup-status-text">다운로드 준비 중...</span>
+          <span id="backup-percent-text">0%</span>
+        </div>
+        <div class="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+          <div id="backup-progress-bar" class="bg-blue-600 h-full w-0 transition-all duration-200"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // 기존 pile-ead40 연동
+    const firebaseConfig = {
+      apiKey: "AIzaSyDFAQhFb6hIkFiXfYYGJAaxBI5bw4gQ36U",
+      authDomain: "pile-ead40.firebaseapp.com",
+      projectId: "pile-ead40",
+      storageBucket: "pile-ead40.firebasestorage.app",
+      messagingSenderId: "179741282513",
+      appId: "1:179741282513:web:0bacd2b11e2196e0ae35f0"
+    };
+
+    if (!firebase.apps.length) {
+      firebase.initializeApp(firebaseConfig);
+    }
+    const db = firebase.firestore();
+
+    let currentDate = getTodayString();
+    let unsubscribeSnapshot = null;
+    let selectedImagesBase64 = [];
+    let currentPosts = [];
+    let modalImageList = [];
+    let modalCurrentIdx = 0;
+    let isZoomed = false;
+
+    function getTodayString() {
+      const d = new Date();
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    }
+
+    window.addEventListener('DOMContentLoaded', () => {
+      document.getElementById('selected-date').value = currentDate;
+      bindFirestoreRealtime(currentDate);
+    });
+
+    function bindFirestoreRealtime(dateStr) {
+      if (unsubscribeSnapshot) unsubscribeSnapshot();
+
+      const feedContainer = document.getElementById('feed-container');
+      feedContainer.innerHTML = `
+        <div class="bg-white rounded-2xl p-6 text-center shadow-sm border border-slate-200 text-slate-400">
+          <i class="ph-bold ph-spinner animate-spin text-2xl text-blue-600 mb-2"></i>
+          <p class="text-sm">실시간 일지를 동기화하는 중...</p>
+        </div>`;
+
+      document.getElementById('today-btn').classList.toggle('hidden', dateStr === getTodayString());
+
+      const postsRef = db.collection('photo_diaries').doc(dateStr).collection('posts').orderBy('timestamp', 'desc');
+
+      unsubscribeSnapshot = postsRef.onSnapshot((snapshot) => {
+        currentPosts = [];
+        snapshot.forEach(doc => {
+          currentPosts.push({ id: doc.id, ...doc.data() });
+        });
+        renderFeed(currentPosts);
+      }, (error) => {
+        console.error("Firestore 실시간 오류:", error);
+      });
+    }
+
+    function changeDate(deltaDays) {
+      const [y, m, d] = currentDate.split('-').map(Number);
+      const targetDate = new Date(y, m - 1, d + deltaDays);
+      currentDate = `${targetDate.getFullYear()}-${String(targetDate.getMonth() + 1).padStart(2, '0')}-${String(targetDate.getDate()).padStart(2, '0')}`;
+      document.getElementById('selected-date').value = currentDate;
+      bindFirestoreRealtime(currentDate);
+    }
+
+    function onDateChange() {
+      currentDate = document.getElementById('selected-date').value;
+      bindFirestoreRealtime(currentDate);
+    }
+
+    function setToday() {
+      currentDate = getTodayString();
+      document.getElementById('selected-date').value = currentDate;
+      bindFirestoreRealtime(currentDate);
+    }
+
+    // 선명도 대폭 개선: FHD(1920px) & 품질 85% 고화질 변환 엔진
+    function compressImage(file, maxDimension = 1920, quality = 0.85) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const img = new Image();
+          img.onload = () => {
+            let width = img.width;
+            let height = img.height;
+
+            if (width > height) {
+              if (width > maxDimension) {
+                height = Math.round((height * maxDimension) / width);
+                width = maxDimension;
+              }
+            } else {
+              if (height > maxDimension) {
+                width = Math.round((width * maxDimension) / height);
+                height = maxDimension;
+              }
+            }
+
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = 'high';
+            ctx.drawImage(img, 0, 0, width, height);
+
+            const compressedDataUrl = canvas.toDataURL('image/jpeg', quality);
+            resolve(compressedDataUrl);
+          };
+          img.onerror = reject;
+          img.src = e.target.result;
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+    }
+
+    async function handleFileSelect(e) {
+      const files = Array.from(e.target.files);
+      if (!files.length) return;
+
+      const submitBtn = document.getElementById('submit-btn');
+      submitBtn.disabled = true;
+      document.getElementById('submit-btn-text').innerText = "변환 중...";
+
+      try {
+        for (const file of files) {
+          const compressedBase64 = await compressImage(file);
+          selectedImagesBase64.push(compressedBase64);
+        }
+        renderPreviewStrip();
+      } catch (err) {
+        alert("이미지 처리 중 오류: " + err.message);
+      } finally {
+        submitBtn.disabled = false;
+        document.getElementById('submit-btn-text').innerText = "등록";
+        e.target.value = "";
+      }
+    }
+
+    function renderPreviewStrip() {
+      const strip = document.getElementById('preview-strip');
+      if (selectedImagesBase64.length === 0) {
+        strip.classList.add('hidden');
+        strip.innerHTML = "";
+        return;
+      }
+
+      strip.classList.remove('hidden');
+      strip.innerHTML = selectedImagesBase64.map((b64, idx) => `
+        <div class="relative flex-shrink-0 w-16 h-16 rounded-lg overflow-hidden border border-slate-300 shadow-sm">
+          <img src="${b64}" class="w-full h-full object-cover">
+          <button onclick="removeSelectedImage(${idx})" class="absolute top-0.5 right-0.5 bg-black/60 hover:bg-red-600 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs transition">
+            <i class="ph-bold ph-x"></i>
+          </button>
+        </div>
+      `).join('');
+    }
+
+    function removeSelectedImage(index) {
+      selectedImagesBase64.splice(index, 1);
+      renderPreviewStrip();
+    }
+
+    // 업로드 등록 (Firestore 직접 저장)
+    async function submitPost() {
+      const commentInput = document.getElementById('comment-input');
+      const comment = commentInput.value.trim();
+
+      if (selectedImagesBase64.length === 0 && !comment) {
+        alert("사진을 찍거나 코멘트를 입력해주세요!");
+        return;
+      }
+
+      const submitBtn = document.getElementById('submit-btn');
+      submitBtn.disabled = true;
+      document.getElementById('submit-btn-text').innerText = "등록 중...";
+
+      const now = new Date();
+      const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
+
+      const postData = {
+        time: timeStr,
+        comment: comment,
+        images: [...selectedImagesBase64],
+        timestamp: firebase.firestore.FieldValue.serverTimestamp()
+      };
+
+      try {
+        await db.collection('photo_diaries').doc(currentDate).collection('posts').add(postData);
+        commentInput.value = "";
+        selectedImagesBase64 = [];
+        renderPreviewStrip();
+      } catch (err) {
+        alert("업로드 실패: 사진 장수가 너무 많을 수 있습니다. 1~3장씩 나누어 올려주세요.");
+      } finally {
+        submitBtn.disabled = false;
+        document.getElementById('submit-btn-text').innerText = "등록";
+      }
+    }
+
+    async function deletePost(postId) {
+      if (!confirm("이 사진 일지를 삭제하시겠습니까?")) return;
+      try {
+        await db.collection('photo_diaries').doc(currentDate).collection('posts').doc(postId).delete();
+      } catch (err) {
+        alert("삭제 실패: " + err.message);
+      }
+    }
+
+    function renderFeed(posts) {
+      const feedContainer = document.getElementById('feed-container');
+
+      if (!posts || posts.length === 0) {
+        feedContainer.innerHTML = `
+          <div class="bg-white rounded-2xl p-8 text-center shadow-sm border border-slate-200">
+            <div class="w-12 h-12 mx-auto rounded-full bg-slate-100 flex items-center justify-center text-slate-400 mb-3">
+              <i class="ph-bold ph-images text-2xl"></i>
+            </div>
+            <p class="font-bold text-slate-700 text-sm">등록된 사진 일지가 없습니다.</p>
+            <p class="text-xs text-slate-400 mt-1">하단 버튼으로 새 사진이나 코멘트를 등록해 보세요.</p>
+          </div>`;
+        return;
+      }
+
+      feedContainer.innerHTML = posts.map((post, postIdx) => {
+        const images = post.images || [];
+        const hasImages = images.length > 0;
+
+        return `
+          <article class="bg-white rounded-2xl p-4 shadow-sm border border-slate-200 transition">
+            <div class="flex items-center justify-between border-b border-slate-100 pb-2 mb-3">
+              <div class="flex items-center gap-1.5 text-xs font-bold text-blue-600 bg-blue-50 px-2.5 py-1 rounded-full">
+                <i class="ph-bold ph-clock"></i>
+                <span>${post.time || '시간 정보 없음'}</span>
+              </div>
+              <button onclick="deletePost('${post.id}')" class="text-slate-400 hover:text-red-500 p-1 transition" title="삭제">
+                <i class="ph-bold ph-trash text-base"></i>
+              </button>
+            </div>
+
+            ${hasImages ? `
+              <div class="grid ${getImageGridClass(images.length)} gap-1.5 rounded-xl overflow-hidden mb-3 bg-slate-100">
+                ${images.map((imgSrc, imgIdx) => `
+                  <div class="relative cursor-pointer aspect-square overflow-hidden bg-slate-200 group" onclick="openModal(${postIdx}, ${imgIdx})">
+                    <img src="${imgSrc}" loading="lazy" class="w-full h-full object-cover">
+                  </div>
+                `).join('')}
+              </div>
+            ` : ''}
+
+            ${post.comment ? `
+              <div class="bg-slate-50 rounded-xl p-3 text-sm text-slate-800 leading-relaxed font-medium border border-slate-100 whitespace-pre-wrap">
+                ${escapeHtml(post.comment)}
+              </div>
+            ` : ''}
+          </article>
+        `;
+      }).join('');
+    }
+
+    function getImageGridClass(count) {
+      if (count === 1) return "grid-cols-1";
+      if (count === 2) return "grid-cols-2";
+      if (count === 3) return "grid-cols-3";
+      if (count === 4) return "grid-cols-2";
+      return "grid-cols-3";
+    }
+
+    // 라이트박스 뷰어 & 확대/축소
+    function openModal(postIdx, imgIdx) {
+      const post = currentPosts[postIdx];
+      if (!post || !post.images) return;
+
+      modalImageList = post.images;
+      modalCurrentIdx = imgIdx;
+      isZoomed = false;
+      document.getElementById('modal-caption').innerText = post.comment || '등록된 코멘트가 없습니다.';
+      updateModalImage();
+
+      document.getElementById('image-modal').classList.remove('hidden');
+      document.body.classList.add('overflow-hidden');
+    }
+
+    function closeModal() {
+      document.getElementById('image-modal').classList.add('hidden');
+      document.body.classList.remove('overflow-hidden');
+    }
+
+    function updateModalImage() {
+      const img = document.getElementById('modal-image');
+      img.src = modalImageList[modalCurrentIdx];
+      img.style.transform = 'scale(1)';
+      img.className = "max-h-[82vh] max-w-[96vw] object-contain transition-transform duration-200 cursor-zoom-in";
+      isZoomed = false;
+      document.getElementById('zoom-toggle-btn').innerText = "2배 확대";
+      document.getElementById('modal-counter').innerText = `${modalCurrentIdx + 1} / ${modalImageList.length}`;
+    }
+
+    function toggleModalZoom() {
+      const img = document.getElementById('modal-image');
+      const btn = document.getElementById('zoom-toggle-btn');
+      if (!isZoomed) {
+        img.style.transform = 'scale(2)';
+        img.className = "max-h-[82vh] max-w-[96vw] object-contain transition-transform duration-200 cursor-zoom-out my-32";
+        btn.innerText = "원위치";
+        isZoomed = true;
+      } else {
+        img.style.transform = 'scale(1)';
+        img.className = "max-h-[82vh] max-w-[96vw] object-contain transition-transform duration-200 cursor-zoom-in";
+        btn.innerText = "2배 확대";
+        isZoomed = false;
+      }
+    }
+
+    function prevModalImage() {
+      modalCurrentIdx = (modalCurrentIdx - 1 + modalImageList.length) % modalImageList.length;
+      updateModalImage();
+    }
+
+    function nextModalImage() {
+      modalCurrentIdx = (modalCurrentIdx + 1) % modalImageList.length;
+      updateModalImage();
+    }
+
+    // 백업 다운로드
+    function openBackupModal() {
+      document.getElementById('backup-modal').classList.remove('hidden');
+    }
+
+    function closeBackupModal() {
+      document.getElementById('backup-modal').classList.add('hidden');
+      document.getElementById('backup-progress-container').classList.add('hidden');
+    }
+
+    async function downloadBackup(mode) {
+      const pContainer = document.getElementById('backup-progress-container');
+      const pText = document.getElementById('backup-status-text');
+      const pPercent = document.getElementById('backup-percent-text');
+      const pBar = document.getElementById('backup-progress-bar');
+
+      pContainer.classList.remove('hidden');
+      pText.innerText = "대상 일자 산출 중...";
+      pBar.style.width = "10%";
+      pPercent.innerText = "10%";
+
+      const dateList = [];
+      const [currY, currM, currD] = currentDate.split('-').map(Number);
+
+      if (mode === 'week') {
+        for (let i = 6; i >= 0; i--) {
+          const d = new Date(currY, currM - 1, currD - i);
+          dateList.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`);
+        }
+      } else {
+        const lastDay = new Date(currY, currM, 0).getDate();
+        for (let day = 1; day <= lastDay; day++) {
+          dateList.push(`${currY}-${String(currM).padStart(2, '0')}-${String(day).padStart(2, '0')}`);
+        }
+      }
+
+      const zip = new JSZip();
+      let totalFoundPosts = 0;
+
+      pText.innerText = "일지 데이터 압축 준비 중...";
+
+      for (const dStr of dateList) {
+        const snap = await db.collection('photo_diaries').doc(dStr).collection('posts').orderBy('timestamp', 'asc').get();
+        if (!snap.empty) {
+          const folder = zip.folder(dStr);
+          let logText = `=== [${dStr} 현장 사진 일지 백업] ===\n\n`;
+
+          snap.forEach((doc, docIdx) => {
+            const data = doc.data();
+            totalFoundPosts++;
+            logText += `[${docIdx + 1}] 시간: ${data.time || '기록 없음'}\n`;
+            logText += `메모/코멘트: ${data.comment || '(없음)'}\n`;
+            logText += `사진 수량: ${(data.images || []).length}장\n`;
+            logText += `----------------------------------------\n\n`;
+
+            (data.images || []).forEach((b64Url, imgIdx) => {
+              const base64Data = b64Url.split(',')[1];
+              folder.file(`시간_${(data.time || '000000').replace(/:/g, '')}_사진${imgIdx + 1}.jpg`, base64Data, { base64: true });
+            });
+          });
+
+          folder.file("일지_내역.txt", logText);
+        }
+      }
+
+      if (totalFoundPosts === 0) {
+        alert("선택하신 기간에 등록된 사진이나 일지가 없습니다.");
+        pContainer.classList.add('hidden');
+        return;
+      }
+
+      pText.innerText = "ZIP 압축 생성 중...";
+      pBar.style.width = "90%";
+      pPercent.innerText = "90%";
+
+      const zipBlob = await zip.generateAsync({ type: "blob" });
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(zipBlob);
+      const zipFileName = mode === 'week' 
+        ? `현장일지_최근1주일백업_${currentDate}.zip` 
+        : `현장일지_${currY}년${currM}월_월간백업.zip`;
+      link.download = zipFileName;
+      link.click();
+      URL.revokeObjectURL(link.href);
+
+      pBar.style.width = "100%";
+      pPercent.innerText = "100%";
+      pText.innerText = "다운로드 완료!";
+
+      setTimeout(() => {
+        closeBackupModal();
+      }, 1200);
+    }
+
+    function scrollToTop() {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
+    function escapeHtml(text) {
+      return text.replace(/[&<>"']/g, (m) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'
+      }[m]));
+    }
+  </script>
+</body>
+</html>
